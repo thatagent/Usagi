@@ -171,8 +171,16 @@ jobs:
                 run: |
                     set -euo pipefail
                     chmod a+x gradlew
+                    # checkReleaseDuplicateClasses is skipped on purpose: the app
+                    # depends on both kotlinx-serialization-core and UsagiApp's
+                    # serialization library, and the latter deliberately ships a
+                    # patched copy of kotlinx.serialization.internal.PluginGeneratedSerialDescriptor.
+                    # The check flags that intended override and fails the build;
+                    # R8 resolves it fine. Drop this flag once upstream sorts the
+                    # dependency out.
                     ./gradlew assembleRelease \
                         --init-script .github/ci/abi-arm64.init.gradle \
+                        -x checkReleaseDuplicateClasses \
                         --no-daemon --no-configuration-cache --stacktrace
 
             -   name: Restore CI keystore
