@@ -1,0 +1,297 @@
+name: Sync upstream & release APK
+
+# Keeps this fork in sync with UsagiApp/Usagi and publishes a signed
+# arm64-v8a release APK for every new upstream commit.
+#
+# Optional repository secrets (recommended). When they are not set, the
+# workflow falls back to a self-generated keystore kept in the Actions cache,
+# so updates normally still install over each other - but if that cache is ever
+# evicted the signature changes and the app has to be reinstalled.
+#   SIGNING_KEYSTORE_BASE64   base64 of a JKS/PKCS12 keystore
+#   SIGNING_KEYSTORE_PASSWORD keystore password
+#   SIGNING_KEY_ALIAS         key alias    (default: usagi)
+#   SIGNING_KEY_PASSWORD      key password (default: keystore password)
+
+on:
+    schedule:
+        -   cron: '0 */6 * * *'
+    workflow_dispatch:
+        inputs:
+            force_release:
+                description: 'Build and release even if the current commit was already released'
+                type: boolean
+                default: false
+
+concurrency:
+    group: ${{ github.workflow }}
+    cancel-in-progress: false
+
+permissions:
+    contents: write
+
+env:
+    UPSTREAM_REPO: https://github.com/UsagiApp/Usagi.git
+    UPSTREAM_BRANCH: devel
+
+jobs:
+    sync-and-release:
+        name: Sync upstream & release APK
+        runs-on: ubuntu-latest
+        timeout-minutes: 120
+        env:
+            HAS_SIGNING_SECRET: ${{ secrets.SIGNING_KEYSTORE_BASE64 != '' }}
+        steps:
+            -   name: Checkout fork 🌏
+                uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6.0.2
+                with:
+                    ref: ${{ github.ref_name }}
+                    fetch-depth: 0
+                    submodules: recursive
+
+            -   name: Merge upstream commits 🔄
+                id: sync
+                run: |
+                    set -euo pipefail
+
+                    git config user.name 'github-actions[bot]'
+                    git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+                    git remote add upstream "$UPSTREAM_REPO" 2>/dev/null || git remote set-url upstream "$UPSTREAM_REPO"
+                    git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+
+                    before="$(git rev-parse HEAD)"
+                    upstream_sha="$(git rev-parse FETCH_HEAD)"
+
+                    if git merge-base --is-ancestor "$upstream_sha" HEAD; then
+                        echo "Already up to date with upstream ($upstream_sha)."
+                    elif git merge --no-edit "upstream/$UPSTREAM_BRANCH"; then
+                        echo "Merged upstream $upstream_sha."
+                    else
+                        # The only conflicts resolved automatically are the CI files
+                        # this fork intentionally removed or replaced. Anything else
+                        # needs a human, so bail out loudly.
+                        blocking=''
+                        for f in $(git diff --name-only --diff-filter=U); do
+                            case "$f" in
+                                .github/workflows/*|.github/ci/*)
+                                    if git cat-file -e "HEAD:$f" 2>/dev/null; then
+                                        git checkout --ours -- "$f"
+                                        git add -- "$f"
+                                    else
+                                        git rm -qf --ignore-unmatch -- "$f"
+                                    fi
+                                    ;;
+                                *)
+                                    blocking="$blocking $f"
+                                    ;;
+                            esac
+                        done
+                        if [ -n "$blocking" ]; then
+                            git merge --abort
+                            echo "::error::Upstream merge conflicts need manual resolution:$blocking"
+                            exit 1
+                        fi
+                        git commit --no-edit
+                        echo "Merged upstream $upstream_sha (kept this fork's CI files)."
+                    fi
+
+                    after="$(git rev-parse HEAD)"
+
+                    # Release name: the newest real commit. After a merge that is the
+                    # upstream tip, otherwise whatever HEAD points at.
+                    if git rev-parse -q --verify HEAD^2 >/dev/null; then
+                        subject="$(git log -1 --format=%s "$upstream_sha")"
+                    else
+                        subject="$(git log -1 --format=%s HEAD)"
+                    fi
+
+                    {
+                        echo "upstream_sha=$upstream_sha"
+                        echo "upstream_short_sha=$(git rev-parse --short=8 "$upstream_sha")"
+                        echo "head_sha=$after"
+                        echo "short_sha=$(git rev-parse --short=8 HEAD)"
+                        echo "merged=$([ "$before" = "$after" ] && echo false || echo true)"
+                        echo "commit_subject<<COMMIT_SUBJECT_EOF"
+                        echo "$subject"
+                        echo "COMMIT_SUBJECT_EOF"
+                    } >> "$GITHUB_OUTPUT"
+
+            -   name: Push to ${{ github.ref_name }} ⬆️
+                if: steps.sync.outputs.merged == 'true'
+                run: |
+                    set -euo pipefail
+                    for delay in 2 4 8 16 0; do
+                        if git push origin "HEAD:${{ github.ref_name }}"; then
+                            exit 0
+                        fi
+                        if [ "$delay" -eq 0 ]; then
+                            break
+                        fi
+                        echo "Push failed, retrying in ${delay}s..."
+                        sleep "$delay"
+                    done
+                    exit 1
+
+            -   name: Decide whether to build 🤔
+                id: decide
+                env:
+                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                    TAG: build-${{ steps.sync.outputs.short_sha }}
+                    FORCE: ${{ inputs.force_release }}
+                run: |
+                    set -euo pipefail
+                    if [ "$FORCE" = 'true' ]; then
+                        echo 'Forced through workflow_dispatch.'
+                        echo 'build=true' >> "$GITHUB_OUTPUT"
+                    elif gh release view "$TAG" --json tagName >/dev/null 2>&1; then
+                        echo "Release $TAG already exists, nothing to do."
+                        echo 'build=false' >> "$GITHUB_OUTPUT"
+                    else
+                        echo "No release for $TAG yet, building."
+                        echo 'build=true' >> "$GITHUB_OUTPUT"
+                    fi
+
+            -   name: Set up JDK 🔧
+                if: steps.decide.outputs.build == 'true'
+                uses: actions/setup-java@b622de1dfa918ecc0ab28f40cd42e3c3752cd6c5 # v5.2.0
+                with:
+                    distribution: 'temurin'
+                    java-version: '21'
+
+            -   name: Set up Gradle 📦
+                if: steps.decide.outputs.build == 'true'
+                uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
+
+            -   name: Set up Android SDK 🤖
+                if: steps.decide.outputs.build == 'true'
+                uses: android-actions/setup-android@v3
+
+            -   name: Build release APK (arm64-v8a) 🏗️
+                if: steps.decide.outputs.build == 'true'
+                run: |
+                    set -euo pipefail
+                    chmod a+x gradlew
+                    ./gradlew assembleRelease \
+                        --init-script .github/ci/abi-arm64.init.gradle \
+                        --no-daemon --no-configuration-cache --stacktrace
+
+            -   name: Restore CI keystore 🗝️
+                if: steps.decide.outputs.build == 'true' && env.HAS_SIGNING_SECRET != 'true'
+                uses: actions/cache@v4
+                with:
+                    path: ${{ runner.temp }}/ci-keystore
+                    key: usagi-ci-keystore-v1
+
+            -   name: Align & sign APK ✍️
+                id: apk
+                if: steps.decide.outputs.build == 'true'
+                env:
+                    KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+                    KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+                    KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+                    KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+                    SHORT_SHA: ${{ steps.sync.outputs.short_sha }}
+                run: |
+                    set -euo pipefail
+
+                    unsigned="$(find app/build/outputs/apk/release -name '*.apk' -type f | sort | head -1)"
+                    if [ -z "$unsigned" ]; then
+                        echo '::error::The build did not produce a release APK.'
+                        exit 1
+                    fi
+                    echo "Built $unsigned"
+
+                    # Make sure the init script actually took effect instead of
+                    # shipping a universal APK under an arm64 name.
+                    abis="$(unzip -Z1 "$unsigned" 'lib/*' 2>/dev/null | cut -d/ -f2 | sort -u | tr '\n' ' ' | xargs || true)"
+                    echo "Packaged ABIs: ${abis:-<none>}"
+                    if [ -n "$abis" ] && [ "$abis" != 'arm64-v8a' ]; then
+                        echo "::error::Expected arm64-v8a only, but the APK contains: $abis"
+                        exit 1
+                    fi
+                    if [ -z "$abis" ]; then
+                        echo '::warning::The APK contains no native libraries at all.'
+                    fi
+
+                    zipalign="$(find "$ANDROID_HOME/build-tools" -name zipalign -type f | sort -V | tail -1)"
+                    apksigner="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
+
+                    keystore_dir="$RUNNER_TEMP/ci-keystore"
+                    keystore="$keystore_dir/usagi.jks"
+                    mkdir -p "$keystore_dir"
+
+                    if [ -n "${KEYSTORE_BASE64:-}" ]; then
+                        echo "$KEYSTORE_BASE64" | base64 -d > "$keystore"
+                        store_pass="$KEYSTORE_PASSWORD"
+                        key_alias="${KEY_ALIAS:-usagi}"
+                        key_pass="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+                        echo 'signing_key=repository secret' >> "$GITHUB_OUTPUT"
+                    else
+                        store_pass='usagi-ci'
+                        key_alias='usagi-ci'
+                        key_pass='usagi-ci'
+                        if [ ! -f "$keystore" ]; then
+                            echo 'No signing secret and no cached key, generating one.'
+                            keytool -genkeypair -keystore "$keystore" -storetype PKCS12 \
+                                -alias "$key_alias" -keyalg RSA -keysize 4096 -validity 10000 \
+                                -storepass "$store_pass" -keypass "$key_pass" \
+                                -dname 'CN=Usagi CI, OU=CI, O=Usagi fork build'
+                        fi
+                        echo 'signing_key=generated CI key (not the upstream key)' >> "$GITHUB_OUTPUT"
+                    fi
+
+                    version="$(sed -n "s/.*versionName *=* *'\([^']*\)'.*/\1/p" app/build.gradle | head -1)"
+                    apk_name="Usagi-${version:-unknown}-arm64-v8a-${SHORT_SHA}.apk"
+                    out="$RUNNER_TEMP/$apk_name"
+
+                    "$zipalign" -f -p 4 "$unsigned" "$RUNNER_TEMP/aligned.apk"
+                    "$apksigner" sign \
+                        --ks "$keystore" --ks-pass "pass:$store_pass" \
+                        --ks-key-alias "$key_alias" --key-pass "pass:$key_pass" \
+                        --v1-signing-enabled true --v2-signing-enabled true \
+                        --out "$out" "$RUNNER_TEMP/aligned.apk"
+                    "$apksigner" verify --print-certs "$out"
+
+                    {
+                        echo "path=$out"
+                        echo "name=$apk_name"
+                        echo "version=${version:-unknown}"
+                        echo "sha256=$(sha256sum "$out" | cut -d' ' -f1)"
+                    } >> "$GITHUB_OUTPUT"
+
+            -   name: Upload APK artifact 📎
+                if: steps.decide.outputs.build == 'true'
+                uses: actions/upload-artifact@v4
+                with:
+                    name: ${{ steps.apk.outputs.name }}
+                    path: ${{ steps.apk.outputs.path }}
+                    if-no-files-found: error
+
+            -   name: Create release 🚀
+                if: steps.decide.outputs.build == 'true'
+                env:
+                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                    TAG: build-${{ steps.sync.outputs.short_sha }}
+                    TITLE: ${{ steps.sync.outputs.commit_subject }}
+                    APK: ${{ steps.apk.outputs.path }}
+                    COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ steps.sync.outputs.head_sha }}
+                    UPSTREAM_URL: https://github.com/UsagiApp/Usagi/commit/${{ steps.sync.outputs.upstream_sha }}
+                run: |
+                    set -euo pipefail
+                    cat > "$RUNNER_TEMP/notes.md" <<NOTES
+                    Automated build of [\`${{ steps.sync.outputs.short_sha }}\`]($COMMIT_URL), synced from upstream [\`${{ steps.sync.outputs.upstream_short_sha }}\`]($UPSTREAM_URL).
+
+                    | | |
+                    |---|---|
+                    | Version | \`${{ steps.apk.outputs.version }}\` |
+                    | ABI | \`arm64-v8a\` |
+                    | Build type | \`release\` |
+                    | Signed with | ${{ steps.apk.outputs.signing_key }} |
+                    | SHA-256 | \`${{ steps.apk.outputs.sha256 }}\` |
+
+                    Unofficial build of [UsagiApp/Usagi](https://github.com/UsagiApp/Usagi) - please report bugs to this fork, not to the upstream project.
+                    NOTES
+                    gh release create "$TAG" \
+                        --title "$TITLE" \
+                        --notes-file "$RUNNER_TEMP/notes.md" \
+                        "$APK"
