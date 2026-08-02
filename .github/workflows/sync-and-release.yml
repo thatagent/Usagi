@@ -41,14 +41,14 @@ jobs:
         env:
             HAS_SIGNING_SECRET: ${{ secrets.SIGNING_KEYSTORE_BASE64 != '' }}
         steps:
-            -   name: Checkout fork 🌏
+            -   name: Checkout fork
                 uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6.0.2
                 with:
                     ref: ${{ github.ref_name }}
                     fetch-depth: 0
                     submodules: recursive
 
-            -   name: Merge upstream commits 🔄
+            -   name: Merge upstream commits
                 id: sync
                 run: |
                     set -euo pipefail
@@ -116,7 +116,7 @@ jobs:
                         echo "COMMIT_SUBJECT_EOF"
                     } >> "$GITHUB_OUTPUT"
 
-            -   name: Push to ${{ github.ref_name }} ⬆️
+            -   name: Push to ${{ github.ref_name }}
                 if: steps.sync.outputs.merged == 'true'
                 run: |
                     set -euo pipefail
@@ -132,7 +132,7 @@ jobs:
                     done
                     exit 1
 
-            -   name: Decide whether to build 🤔
+            -   name: Decide whether to build
                 id: decide
                 env:
                     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -151,22 +151,22 @@ jobs:
                         echo 'build=true' >> "$GITHUB_OUTPUT"
                     fi
 
-            -   name: Set up JDK 🔧
+            -   name: Set up JDK
                 if: steps.decide.outputs.build == 'true'
                 uses: actions/setup-java@b622de1dfa918ecc0ab28f40cd42e3c3752cd6c5 # v5.2.0
                 with:
                     distribution: 'temurin'
                     java-version: '21'
 
-            -   name: Set up Gradle 📦
+            -   name: Set up Gradle
                 if: steps.decide.outputs.build == 'true'
                 uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
 
-            -   name: Set up Android SDK 🤖
+            -   name: Set up Android SDK
                 if: steps.decide.outputs.build == 'true'
                 uses: android-actions/setup-android@v3
 
-            -   name: Build release APK (arm64-v8a) 🏗️
+            -   name: Build release APK (arm64-v8a)
                 if: steps.decide.outputs.build == 'true'
                 run: |
                     set -euo pipefail
@@ -175,14 +175,14 @@ jobs:
                         --init-script .github/ci/abi-arm64.init.gradle \
                         --no-daemon --no-configuration-cache --stacktrace
 
-            -   name: Restore CI keystore 🗝️
+            -   name: Restore CI keystore
                 if: steps.decide.outputs.build == 'true' && env.HAS_SIGNING_SECRET != 'true'
                 uses: actions/cache@v4
                 with:
                     path: ${{ runner.temp }}/ci-keystore
                     key: usagi-ci-keystore-v1
 
-            -   name: Align & sign APK ✍️
+            -   name: Align & sign APK
                 id: apk
                 if: steps.decide.outputs.build == 'true'
                 env:
@@ -194,7 +194,7 @@ jobs:
                 run: |
                     set -euo pipefail
 
-                    unsigned="$(find app/build/outputs/apk/release -name '*.apk' -type f | sort | head -1)"
+                    unsigned="$(find app/build/outputs/apk/release -name '*.apk' -type f 2>/dev/null | sort | head -1 || true)"
                     if [ -z "$unsigned" ]; then
                         echo '::error::The build did not produce a release APK.'
                         exit 1
@@ -213,8 +213,12 @@ jobs:
                         echo '::warning::The APK contains no native libraries at all.'
                     fi
 
-                    zipalign="$(find "$ANDROID_HOME/build-tools" -name zipalign -type f | sort -V | tail -1)"
-                    apksigner="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
+                    zipalign="$(find "$ANDROID_HOME/build-tools" -name zipalign -type f 2>/dev/null | sort -V | tail -1 || true)"
+                    apksigner="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f 2>/dev/null | sort -V | tail -1 || true)"
+                    if [ -z "$zipalign" ] || [ -z "$apksigner" ]; then
+                        echo "::error::zipalign/apksigner not found under $ANDROID_HOME/build-tools"
+                        exit 1
+                    fi
 
                     keystore_dir="$RUNNER_TEMP/ci-keystore"
                     keystore="$keystore_dir/usagi.jks"
@@ -259,7 +263,7 @@ jobs:
                         echo "sha256=$(sha256sum "$out" | cut -d' ' -f1)"
                     } >> "$GITHUB_OUTPUT"
 
-            -   name: Upload APK artifact 📎
+            -   name: Upload APK artifact
                 if: steps.decide.outputs.build == 'true'
                 uses: actions/upload-artifact@v4
                 with:
@@ -267,7 +271,7 @@ jobs:
                     path: ${{ steps.apk.outputs.path }}
                     if-no-files-found: error
 
-            -   name: Create release 🚀
+            -   name: Create release
                 if: steps.decide.outputs.build == 'true'
                 env:
                     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
