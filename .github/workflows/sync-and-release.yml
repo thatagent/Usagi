@@ -56,15 +56,21 @@ jobs:
                     git config user.name 'github-actions[bot]'
                     git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
-                    git remote add upstream "$UPSTREAM_REPO" 2>/dev/null || git remote set-url upstream "$UPSTREAM_REPO"
-                    git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+                    # Fetch by URL and merge FETCH_HEAD instead of adding an
+                    # 'upstream' remote. The gh CLI resolves which repository to
+                    # act on from the git remotes and prefers one named 'upstream'
+                    # over 'origin', which would aim the release at UsagiApp/Usagi
+                    # instead of this fork. No upstream remote, no ambiguity.
+                    git remote remove upstream 2>/dev/null || true
+                    git fetch --no-tags "$UPSTREAM_REPO" "$UPSTREAM_BRANCH"
 
                     before="$(git rev-parse HEAD)"
                     upstream_sha="$(git rev-parse FETCH_HEAD)"
+                    merge_msg="Merge UsagiApp/Usagi@$(git rev-parse --short=8 FETCH_HEAD) into $GITHUB_REF_NAME"
 
                     if git merge-base --is-ancestor "$upstream_sha" HEAD; then
                         echo "Already up to date with upstream ($upstream_sha)."
-                    elif git merge --no-edit "upstream/$UPSTREAM_BRANCH"; then
+                    elif git merge --no-edit -m "$merge_msg" FETCH_HEAD; then
                         echo "Merged upstream $upstream_sha."
                     else
                         # The only conflicts resolved automatically are the CI files
@@ -136,6 +142,7 @@ jobs:
                 id: decide
                 env:
                     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                    GH_REPO: ${{ github.repository }}
                     TAG: build-${{ steps.sync.outputs.short_sha }}
                     FORCE: ${{ inputs.force_release }}
                 run: |
@@ -143,7 +150,7 @@ jobs:
                     if [ "$FORCE" = 'true' ]; then
                         echo 'Forced through workflow_dispatch.'
                         echo 'build=true' >> "$GITHUB_OUTPUT"
-                    elif gh release view "$TAG" --json tagName >/dev/null 2>&1; then
+                    elif gh release view "$TAG" --repo "$GH_REPO" --json tagName >/dev/null 2>&1; then
                         echo "Release $TAG already exists, nothing to do."
                         echo 'build=false' >> "$GITHUB_OUTPUT"
                     else
@@ -283,8 +290,10 @@ jobs:
                 if: steps.decide.outputs.build == 'true'
                 env:
                     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                    GH_REPO: ${{ github.repository }}
                     TAG: build-${{ steps.sync.outputs.short_sha }}
                     TITLE: ${{ steps.sync.outputs.commit_subject }}
+                    HEAD_SHA: ${{ steps.sync.outputs.head_sha }}
                     APK: ${{ steps.apk.outputs.path }}
                     COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ steps.sync.outputs.head_sha }}
                     UPSTREAM_URL: https://github.com/UsagiApp/Usagi/commit/${{ steps.sync.outputs.upstream_sha }}
@@ -303,7 +312,11 @@ jobs:
 
                     Unofficial build of [UsagiApp/Usagi](https://github.com/UsagiApp/Usagi) - please report bugs to this fork, not to the upstream project.
                     NOTES
+                    # --repo is explicit so the release always lands in this fork,
+                    # whatever remotes happen to exist in the checkout.
                     gh release create "$TAG" \
+                        --repo "$GH_REPO" \
+                        --target "$HEAD_SHA" \
                         --title "$TITLE" \
                         --notes-file "$RUNNER_TEMP/notes.md" \
                         "$APK"
