@@ -397,6 +397,8 @@
     <string name="ignore_ssl_errors">Ignore SSL errors</string>
     <string name="mirror_switching">Choose mirror automatically</string>
     <string name="mirror_switching_summary">Automatically switch domains for manga sources on errors if mirrors are available</string>
+    <string name="transfer_cookies_on_redirect">Automatically transfer cookies to the new domain (beta)</string>
+    <string name="transfer_cookies_on_redirect_summary">Automatically copy and transfer cookies from the old domain to the new domain if a redirection of the source comic\'s domain to a different domain is detected</string>
     <string name="pause">Pause</string>
     <string name="resume">Resume</string>
     <string name="paused">Paused</string>
@@ -739,6 +741,8 @@
     <string name="no_fix_required">No fix required for \"%s\"</string>
     <string name="no_alternatives_found">No alternatives found for \"%s\"</string>
     <string name="manga_fix_prompt">This function will find alternative sources for the selected manga. The task will take some time and will proceed in the background</string>
+    <string name="fix_excluded_sources">Auto-fix exclude sources</string>
+    <string name="fix_excluded_sources_summary">Specify sources that you do not want to use in auto-fix manga feature</string>
     <string name="content_type_novel">Novel</string>
     <string name="content_type_manhua">Manhua</string>
     <string name="content_type_manhwa">Manhwa</string>
